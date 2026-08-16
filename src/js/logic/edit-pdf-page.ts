@@ -396,14 +396,11 @@ async function replaceSelectedText(registry: any) {
         contents: replacement,
         fontSize: estimateReplacementFontSize(replacementRect, replacement),
         fontColor: '#000000',
-        fontFamily: 'Helvetica',
         backgroundColor: '#FFFFFF',
         opacity: 1,
       };
 
-      annotationScope.createAnnotation(pageIndex, annotation, {
-        source: 'programmatic',
-      });
+      annotationScope.createAnnotation(pageIndex, annotation);
       await annotationScope.commit().toPromise();
     }
 
