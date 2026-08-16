@@ -25,6 +25,12 @@ type FormattedSelection = {
   segmentRects: PdfRect[];
 };
 
+type CurrentTextSelection = {
+  documentId: string;
+  selectionScope: any;
+  formattedSelection: FormattedSelection[];
+};
+
 let viewerInstance: EmbedPdfContainer | null = null;
 let docManagerPlugin: DocManagerPlugin | null = null;
 let isViewerInitialized = false;
@@ -162,6 +168,9 @@ async function handleFiles(files: FileList) {
         documentManager: {
           maxDocuments: 10,
         },
+        redaction: {
+          drawBlackBoxes: false,
+        },
         tabBar: 'always',
       });
 
@@ -281,77 +290,121 @@ function ensureReplaceSelectedTextPanel(pdfWrapper: HTMLElement, registry: any) 
   const heading = document.createElement('div');
   heading.className = 'flex items-center gap-2';
   heading.innerHTML =
-    '<i data-lucide="text-cursor-input" class="w-5 h-5 text-indigo-400"></i><span class="font-semibold text-white">Replace Existing Text <span class="text-xs font-normal text-indigo-300">Beta</span></span>';
+    '<i data-lucide="eraser" class="w-5 h-5 text-indigo-400"></i><span class="font-semibold text-white">Remove / Replace Existing Text <span class="text-xs font-normal text-indigo-300">Beta</span></span>';
 
   const help = document.createElement('p');
   help.className = 'text-sm text-gray-400';
   help.textContent =
-    'Select one line of existing text in the PDF, then replace it. Best for names, dates, amounts, and short labels.';
+    'Select one or more lines of existing PDF text. Remove permanently deletes only the selected text, without drawing a replacement box. Multi-page selections are supported for removal.';
 
-  const button = document.createElement('button');
-  button.id = 'replace-selected-text-btn';
-  button.className =
+  const removeButton = document.createElement('button');
+  removeButton.id = 'remove-selected-text-btn';
+  removeButton.className =
     'w-full bg-indigo-600 hover:bg-indigo-700 text-white font-semibold py-2.5 px-4 rounded-lg transition-colors';
-  button.textContent = 'Replace Selected Text';
-  button.onclick = () => replaceSelectedText(registry);
+  removeButton.textContent = 'Remove Selected Text';
+  removeButton.onclick = () => removeSelectedText(registry);
 
-  panel.append(heading, help, button);
+  const replaceButton = document.createElement('button');
+  replaceButton.id = 'replace-selected-text-btn';
+  replaceButton.className =
+    'w-full bg-gray-700 hover:bg-gray-600 text-white font-medium py-2.5 px-4 rounded-lg transition-colors';
+  replaceButton.textContent = 'Replace Selected Text';
+  replaceButton.onclick = () => replaceSelectedText(registry);
+
+  panel.append(heading, help, removeButton, replaceButton);
   pdfWrapper.appendChild(panel);
   createIcons({ icons });
 }
 
-async function replaceSelectedText(registry: any) {
+function getCurrentTextSelection(registry: any): CurrentTextSelection | null {
   const documentManager = docManagerPlugin as unknown as {
     getActiveDocumentId?: () => string | null;
   };
   const documentId = documentManager?.getActiveDocumentId?.();
 
   if (!documentId) {
-    showAlert('No Active PDF', 'Open a PDF before replacing text.');
+    showAlert('No Active PDF', 'Open a PDF before editing text.');
+    return null;
+  }
+
+  const selectionCapability = registry.getPlugin('selection').provides() as any;
+  const selectionScope = selectionCapability.forDocument(documentId);
+  const formattedSelection =
+    selectionScope.getFormattedSelection() as FormattedSelection[];
+
+  if (!formattedSelection?.length) {
+    showAlert(
+      'Select Text First',
+      'Drag over the existing PDF text you want to remove or replace.'
+    );
+    return null;
+  }
+
+  return { documentId, selectionScope, formattedSelection };
+}
+
+async function permanentlyRemoveCurrentSelection(
+  registry: any,
+  documentId: string
+): Promise<void> {
+  const redactionCapability = registry.getPlugin('redaction').provides() as any;
+  const redactionScope = redactionCapability.forDocument(documentId);
+  const queued = await redactionScope
+    .queueCurrentSelectionAsPending()
+    .toPromise();
+
+  if (!queued) {
+    throw new Error('Could not queue the selected text for removal.');
+  }
+
+  const redacted = await redactionScope.commitAllPending().toPromise();
+  if (!redacted) {
+    throw new Error('Could not remove the selected text.');
+  }
+}
+
+async function removeSelectedText(registry: any) {
+  const current = getCurrentTextSelection(registry);
+  if (!current) return;
+
+  showLoader('Removing selected text...');
+
+  try {
+    await permanentlyRemoveCurrentSelection(registry, current.documentId);
+  } catch (error) {
+    console.error('Error removing selected PDF text:', error);
+    const message = error instanceof Error ? error.message : String(error);
+    showAlert('Remove Text Failed', message);
+  } finally {
+    hideLoader();
+  }
+}
+
+async function replaceSelectedText(registry: any) {
+  const current = getCurrentTextSelection(registry);
+  if (!current) return;
+
+  const { documentId, selectionScope, formattedSelection } = current;
+  const pageIndexes = new Set(
+    formattedSelection.map((selection) => selection.pageIndex)
+  );
+  const rects = formattedSelection.flatMap(
+    (selection) => selection.segmentRects || []
+  );
+
+  if (pageIndexes.size !== 1 || rects.length === 0) {
+    showAlert(
+      'One-Page Block Required',
+      'Replacement supports multi-line text blocks, but the selected block must be on one page. Use Remove Selected Text for multi-page selections.'
+    );
     return;
   }
 
   try {
-    const selectionCapability = registry.getPlugin('selection').provides() as any;
-    const selectionScope = selectionCapability.forDocument(documentId);
-    const formattedSelection =
-      selectionScope.getFormattedSelection() as FormattedSelection[];
-
-    if (!formattedSelection?.length) {
-      showAlert(
-        'Select Text First',
-        'Drag over one line of existing PDF text, then click Replace Selected Text.'
-      );
-      return;
-    }
-
-    const pageIndexes = new Set(
-      formattedSelection.map((selection) => selection.pageIndex)
-    );
-    const rects = formattedSelection.flatMap(
-      (selection) => selection.segmentRects || []
-    );
-
-    if (
-      pageIndexes.size !== 1 ||
-      rects.length === 0 ||
-      !isSingleVisualLine(rects)
-    ) {
-      showAlert(
-        'Single-Line Selection Required',
-        'This beta editor currently replaces one line of text on one page at a time.'
-      );
-      return;
-    }
-
     const selectedTextParts = await selectionScope.getSelectedText().toPromise();
-    const originalText = (selectedTextParts || [])
-      .join(' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
+    const originalText = (selectedTextParts || []).join('\n').trim();
     const replacement = window.prompt(
-      'Replace selected text with:',
+      'Replace the selected text block with:',
       originalText
     );
 
@@ -360,22 +413,8 @@ async function replaceSelectedText(registry: any) {
     const pageIndex = formattedSelection[0].pageIndex;
     const replacementRect = unionRects(rects);
 
-    showLoader('Replacing text...');
-
-    const redactionCapability = registry.getPlugin('redaction').provides() as any;
-    const redactionScope = redactionCapability.forDocument(documentId);
-    const queued = await redactionScope
-      .queueCurrentSelectionAsPending()
-      .toPromise();
-
-    if (!queued) {
-      throw new Error('Could not queue the selected text for replacement.');
-    }
-
-    const redacted = await redactionScope.commitAllPending().toPromise();
-    if (!redacted) {
-      throw new Error('Could not remove the original selected text.');
-    }
+    showLoader('Replacing selected text...');
+    await permanentlyRemoveCurrentSelection(registry, documentId);
 
     if (replacement.length > 0) {
       const annotationCapability = registry
@@ -395,22 +434,17 @@ async function replaceSelectedText(registry: any) {
         rect: replacementRect,
         contents: replacement,
         fontSize: estimateReplacementFontSize(replacementRect, replacement),
-        fontColor: '#000000',
-        backgroundColor: '#FFFFFF',
-        opacity: 1,
       };
 
       annotationScope.createAnnotation(pageIndex, annotation);
       await annotationScope.commit().toPromise();
     }
-
-    selectionScope.clear();
   } catch (error) {
     console.error('Error replacing selected PDF text:', error);
     const message = error instanceof Error ? error.message : String(error);
     showAlert(
       'Replace Text Failed',
-      `${message}\n\nTry a shorter, single-line text selection.`
+      `${message}\n\nRemoval is the more reliable operation for complex PDF text blocks.`
     );
   } finally {
     hideLoader();
@@ -436,21 +470,13 @@ function unionRects(rects: PdfRect[]): PdfRect {
   };
 }
 
-function isSingleVisualLine(rects: PdfRect[]): boolean {
-  if (rects.length <= 1) return true;
-
-  const heights = rects.map((rect) => Math.max(1, rect.size.height));
-  const maxHeight = Math.max(...heights);
-  const centers = rects.map(
-    (rect) => rect.origin.y + Math.max(1, rect.size.height) / 2
-  );
-  const verticalSpread = Math.max(...centers) - Math.min(...centers);
-
-  return verticalSpread <= maxHeight * 0.65;
-}
-
 function estimateReplacementFontSize(rect: PdfRect, replacement: string): number {
-  let fontSize = Math.max(5, Math.min(72, rect.size.height * 0.78));
+  const lines = replacement.split(/\r?\n/);
+  const lineCount = Math.max(1, lines.length);
+  let fontSize = Math.max(
+    5,
+    Math.min(72, (rect.size.height / lineCount) * 0.78)
+  );
   if (!replacement) return fontSize;
 
   const canvas = document.createElement('canvas');
@@ -458,7 +484,9 @@ function estimateReplacementFontSize(rect: PdfRect, replacement: string): number
   if (!context) return fontSize;
 
   context.font = `${fontSize}px Arial, Helvetica, sans-serif`;
-  const measuredWidth = context.measureText(replacement).width;
+  const measuredWidth = Math.max(
+    ...lines.map((line) => context.measureText(line || ' ').width)
+  );
   const availableWidth = Math.max(1, rect.size.width * 0.96);
 
   if (measuredWidth > availableWidth) {
