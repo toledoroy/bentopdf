@@ -13,6 +13,32 @@ const embedPdfWasmUrl = new URL(
   import.meta.url
 ).href;
 
+// This editor's verified-save policy only authorizes the custom transparent
+// text removal/replacement workflow. Hide unrelated mutation and bypass paths
+// instead of allowing them to create an in-memory document that cannot pass
+// preservation verification.
+const HARDENED_EDITOR_DISABLED_CATEGORIES = [
+  'annotation',
+  'redaction',
+  'history',
+  'pointer',
+  'document-open',
+  'document-print',
+  'document-protect',
+  'rotate',
+  'panel-comment',
+  'panel-annotation-style',
+] as const;
+
+function getHardenedEditorDisabledCategories(): string[] {
+  return Array.from(
+    new Set([
+      ...getEditorDisabledCategories(),
+      ...HARDENED_EDITOR_DISABLED_CATEGORIES,
+    ])
+  );
+}
+
 import type { EmbedPdfContainer } from 'embedpdf-snippet';
 import type { DocManagerPlugin } from '@/types';
 
@@ -177,7 +203,7 @@ async function handleFiles(files: FileList): Promise<void> {
 
       const { default: EmbedPDF } = await import('embedpdf-snippet');
       viewerInstance = EmbedPDF.init({
-        disabledCategories: getEditorDisabledCategories(),
+        disabledCategories: getHardenedEditorDisabledCategories(),
         type: 'container',
         target: pdfContainer,
         worker: true,
