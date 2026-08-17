@@ -1,8 +1,130 @@
-const PASSWORD = '123';
-const COOKIE_NAME = 'bentopdf_access';
-const COOKIE_VALUE = 'granted';
+const DEFAULT_PASSWORD = '123';
+const COOKIE_NAME = '__Host-bentopdf_access';
+const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
+const MAX_LOGIN_BODY_BYTES = 4096;
+const encoder = new TextEncoder();
 
-function loginPage(error = false): Response {
+function sitePassword(): string {
+  return process.env.SITE_PASSWORD?.trim() || DEFAULT_PASSWORD;
+}
+
+function authSecret(): string {
+  const configuredSecret = process.env.AUTH_SECRET?.trim() || sitePassword();
+  // Bind sessions to both the private signing secret and the current password,
+  // so changing either value invalidates every existing cookie.
+  return `${configuredSecret}\u0000${sitePassword()}`;
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
+}
+
+function constantTimeEqual(left: string, right: string): boolean {
+  if (left.length !== right.length) return false;
+
+  let difference = 0;
+  for (let index = 0; index < left.length; index++) {
+    difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+async function sha256(value: string): Promise<string> {
+  const digest = await globalThis.crypto.subtle.digest(
+    'SHA-256',
+    encoder.encode(value)
+  );
+  return bytesToHex(new Uint8Array(digest));
+}
+
+async function hmac(value: string): Promise<string> {
+  const key = await globalThis.crypto.subtle.importKey(
+    'raw',
+    encoder.encode(authSecret()),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await globalThis.crypto.subtle.sign(
+    'HMAC',
+    key,
+    encoder.encode(value)
+  );
+  return bytesToHex(new Uint8Array(signature));
+}
+
+async function securePasswordMatch(candidate: string): Promise<boolean> {
+  const [candidateHash, expectedHash] = await Promise.all([
+    sha256(candidate),
+    sha256(sitePassword()),
+  ]);
+  return constantTimeEqual(candidateHash, expectedHash);
+}
+
+async function createSessionToken(): Promise<string> {
+  const expiresAt =
+    Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+  const payload = `v1.${expiresAt}`;
+  return `${payload}.${await hmac(payload)}`;
+}
+
+function getCookie(request: Request, name: string): string | null {
+  const header = request.headers.get('cookie') ?? '';
+
+  for (const part of header.split(';')) {
+    const separator = part.indexOf('=');
+    if (separator < 0) continue;
+
+    const cookieName = part.slice(0, separator).trim();
+    if (cookieName !== name) continue;
+
+    return part.slice(separator + 1).trim();
+  }
+
+  return null;
+}
+
+async function hasValidSession(request: Request): Promise<boolean> {
+  const token = getCookie(request, COOKIE_NAME);
+  if (!token) return false;
+
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts[0] !== 'v1') return false;
+
+  const expiresAt = Number(parts[1]);
+  if (!Number.isSafeInteger(expiresAt)) return false;
+
+  const now = Math.floor(Date.now() / 1000);
+  if (expiresAt <= now) return false;
+  if (expiresAt > now + SESSION_TTL_SECONDS + 300) return false;
+
+  const payload = `v1.${expiresAt}`;
+  const expected = await hmac(payload);
+  return constantTimeEqual(parts[2], expected);
+}
+
+function securityHeaders(): Headers {
+  const headers = new Headers({
+    'cache-control': 'no-store, max-age=0',
+    pragma: 'no-cache',
+    expires: '0',
+    'x-robots-tag': 'noindex, nofollow',
+    'x-content-type-options': 'nosniff',
+    'x-frame-options': 'DENY',
+    'referrer-policy': 'no-referrer',
+    'permissions-policy':
+      'accelerometer=(), camera=(), geolocation=(), gyroscope=(), microphone=(), payment=(), usb=()',
+    'cross-origin-opener-policy': 'same-origin',
+    'cross-origin-resource-policy': 'same-origin',
+    'content-security-policy':
+      "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
+  });
+  return headers;
+}
+
+function loginPage(error = false, status?: number): Response {
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -27,47 +149,101 @@ function loginPage(error = false): Response {
   <main>
     <h1>PDF Tools</h1>
     <p>This site is private.</p>
-    <form method="post">
-      <input name="password" type="password" autocomplete="current-password" placeholder="Password" autofocus required />
+    <form method="post" action="">
+      <input name="password" type="password" autocomplete="current-password" maxlength="256" placeholder="Password" autofocus required />
       <button type="submit">Enter</button>
     </form>
-    ${error ? '<div class="error">Wrong password.</div>' : ''}
+    ${error ? '<div class="error">Wrong password or invalid request.</div>' : ''}
   </main>
 </body>
 </html>`;
 
+  const headers = securityHeaders();
+  headers.set('content-type', 'text/html; charset=utf-8');
+
   return new Response(html, {
-    status: error ? 401 : 200,
-    headers: {
-      'content-type': 'text/html; charset=utf-8',
-      'cache-control': 'no-store, max-age=0',
-      'x-robots-tag': 'noindex, nofollow',
-    },
+    status: status ?? (error ? 401 : 200),
+    headers,
   });
 }
 
-export default async function middleware(request: Request) {
-  const cookie = request.headers.get('cookie') || '';
-  const hasAccess = cookie
-    .split(';')
-    .map((part) => part.trim())
-    .includes(`${COOKIE_NAME}=${COOKIE_VALUE}`);
+function methodNotAllowed(): Response {
+  const headers = securityHeaders();
+  headers.set('allow', 'GET, HEAD, POST');
+  return new Response(null, { status: 405, headers });
+}
 
-  if (hasAccess) return;
+function requestIsSameOrigin(request: Request): boolean {
+  const origin = request.headers.get('origin');
+  if (!origin) return true;
+  return origin === new URL(request.url).origin;
+}
+
+async function readLoginPassword(request: Request): Promise<string | null> {
+  const contentType = (
+    request.headers.get('content-type') ?? ''
+  )
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase();
+
+  if (contentType !== 'application/x-www-form-urlencoded') {
+    return null;
+  }
+
+  const declaredLength = Number(
+    request.headers.get('content-length') ?? '0'
+  );
+  if (
+    Number.isFinite(declaredLength) &&
+    declaredLength > MAX_LOGIN_BODY_BYTES
+  ) {
+    return null;
+  }
+
+  const body = await request.text();
+  if (body.length > MAX_LOGIN_BODY_BYTES) return null;
+
+  const password = new URLSearchParams(body).get('password');
+  if (password === null || password.length > 256) return null;
+  return password;
+}
+
+export default async function middleware(request: Request) {
+  if (!globalThis.crypto?.subtle) {
+    return new Response('Authentication unavailable.', {
+      status: 503,
+      headers: securityHeaders(),
+    });
+  }
+
+  if (await hasValidSession(request)) return;
+
+  if (!['GET', 'HEAD', 'POST'].includes(request.method)) {
+    return methodNotAllowed();
+  }
 
   if (request.method === 'POST') {
-    const form = await request.formData();
-    const password = String(form.get('password') || '');
+    if (!requestIsSameOrigin(request)) {
+      return loginPage(true, 403);
+    }
 
-    if (password === PASSWORD) {
-      return new Response(null, {
-        status: 303,
-        headers: {
-          location: new URL(request.url).pathname || '/',
-          'set-cookie': `${COOKIE_NAME}=${COOKIE_VALUE}; Path=/; Max-Age=2592000; HttpOnly; Secure; SameSite=Lax`,
-          'cache-control': 'no-store, max-age=0',
-        },
-      });
+    const password = await readLoginPassword(request);
+    if (
+      password !== null &&
+      (await securePasswordMatch(password))
+    ) {
+      const url = new URL(request.url);
+      const token = await createSessionToken();
+      const headers = securityHeaders();
+
+      headers.set('location', `${url.pathname}${url.search}`);
+      headers.set(
+        'set-cookie',
+        `${COOKIE_NAME}=${token}; Path=/; Max-Age=${SESSION_TTL_SECONDS}; HttpOnly; Secure; SameSite=Strict`
+      );
+
+      return new Response(null, { status: 303, headers });
     }
 
     return loginPage(true);
