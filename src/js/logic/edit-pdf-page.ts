@@ -5,6 +5,11 @@ import { formatBytes, downloadFile } from '../utils/helpers.js';
 import { makeUniqueFileKey } from '../utils/deduplicate-filename.js';
 import { batchDecryptIfNeeded } from '../utils/password-prompt.js';
 import { getEditorDisabledCategories } from '../utils/disabled-tools.js';
+import {
+  createPdfPreservationSnapshot,
+  verifyPdfPreservation,
+  type PdfPreservationSnapshot,
+} from '../utils/pdf-preservation-guard.js';
 
 const embedPdfWasmUrl = new URL(
   'embedpdf-snippet/dist/pdfium.wasm',
@@ -31,11 +36,22 @@ type CurrentTextSelection = {
   formattedSelection: FormattedSelection[];
 };
 
+type DocumentMutationState = {
+  touchedPages: Set<number>;
+  annotationPages: Set<number>;
+};
+
+const DEFAULT_TRANSPARENT_EDITING = true;
+
 let viewerInstance: EmbedPdfContainer | null = null;
 let docManagerPlugin: DocManagerPlugin | null = null;
 let isViewerInitialized = false;
 let currentFileName = 'document.pdf';
 const fileEntryMap = new Map<string, HTMLElement>();
+const documentFileNameMap = new Map<string, string>();
+const pendingBaselineMap = new Map<string, Promise<PdfPreservationSnapshot>>();
+const baselineMap = new Map<string, Promise<PdfPreservationSnapshot>>();
+const mutationStateMap = new Map<string, DocumentMutationState>();
 
 function resetViewer() {
   const pdfWrapper = document.getElementById('embed-pdf-wrapper');
@@ -54,6 +70,10 @@ function resetViewer() {
   docManagerPlugin = null;
   isViewerInitialized = false;
   fileEntryMap.clear();
+  documentFileNameMap.clear();
+  pendingBaselineMap.clear();
+  baselineMap.clear();
+  mutationStateMap.clear();
 }
 
 function removeFileEntry(documentId: string) {
@@ -62,9 +82,44 @@ function removeFileEntry(documentId: string) {
     entry.remove();
     fileEntryMap.delete(documentId);
   }
+  documentFileNameMap.delete(documentId);
+  baselineMap.delete(documentId);
+  mutationStateMap.delete(documentId);
   if (fileEntryMap.size === 0) {
     resetViewer();
   }
+}
+
+function getMutationState(documentId: string): DocumentMutationState {
+  let state = mutationStateMap.get(documentId);
+  if (!state) {
+    state = {
+      touchedPages: new Set<number>(),
+      annotationPages: new Set<number>(),
+    };
+    mutationStateMap.set(documentId, state);
+  }
+  return state;
+}
+
+function recordTouchedPages(
+  documentId: string,
+  formattedSelection: FormattedSelection[]
+) {
+  const state = getMutationState(documentId);
+  for (const selection of formattedSelection) {
+    state.touchedPages.add(selection.pageIndex);
+  }
+}
+
+function queuePreservationBaseline(documentKey: string, buffer: ArrayBuffer) {
+  pendingBaselineMap.set(
+    documentKey,
+    createPdfPreservationSnapshot(buffer).catch((error) => {
+      console.error('Failed to create PDF preservation baseline:', error);
+      throw error;
+    })
+  );
 }
 
 if (document.readyState === 'loading') {
@@ -169,7 +224,7 @@ async function handleFiles(files: FileList) {
           maxDocuments: 10,
         },
         redaction: {
-          drawBlackBoxes: false,
+          drawBlackBoxes: !DEFAULT_TRANSPARENT_EDITING,
         },
         tabBar: 'always',
       });
@@ -188,38 +243,53 @@ async function handleFiles(files: FileList) {
         (data: { id?: string; name?: string }) => {
           const docId = data?.id;
           const docKey = data?.name;
-          if (!docId) return;
+          if (!docId || !docKey) return;
           const pendingEntry = fileDisplayArea.querySelector(
             `[data-pending-name="${CSS.escape(docKey)}"]`
           ) as HTMLElement;
           if (pendingEntry) {
             pendingEntry.removeAttribute('data-pending-name');
             fileEntryMap.set(docId, pendingEntry);
+            const originalName = pendingEntry.getAttribute('data-file-name');
+            if (originalName) {
+              documentFileNameMap.set(docId, originalName);
+            }
             const removeBtn = pendingEntry.querySelector(
               '[data-remove-btn]'
             ) as HTMLElement;
             if (removeBtn) {
               removeBtn.onclick = () => {
-                docManagerPlugin.closeDocument(docId);
+                docManagerPlugin?.closeDocument(docId);
               };
             }
           }
+
+          const baseline = pendingBaselineMap.get(docKey);
+          if (baseline) {
+            baselineMap.set(docId, baseline);
+            pendingBaselineMap.delete(docKey);
+          }
+          getMutationState(docId);
         }
       );
 
       addFileEntries(fileDisplayArea, decryptedFiles);
 
+      const firstDocumentKey = makeUniqueFileKey(0, firstFile.name);
+      queuePreservationBaseline(firstDocumentKey, firstBuffer);
       docManagerPlugin.openDocumentBuffer({
         buffer: firstBuffer,
-        name: makeUniqueFileKey(0, firstFile.name),
+        name: firstDocumentKey,
         autoActivate: true,
       });
 
       for (let i = 1; i < decryptedFiles.length; i++) {
         const buffer = await decryptedFiles[i].arrayBuffer();
+        const documentKey = makeUniqueFileKey(i, decryptedFiles[i].name);
+        queuePreservationBaseline(documentKey, buffer);
         docManagerPlugin.openDocumentBuffer({
           buffer,
-          name: makeUniqueFileKey(i, decryptedFiles[i].name),
+          name: documentKey,
           autoActivate: false,
         });
       }
@@ -239,14 +309,63 @@ async function handleFiles(files: FileList) {
       downloadBtn.classList.remove('hidden');
 
       downloadBtn.onclick = async () => {
+        showLoader('Verifying preservation before download...');
         try {
+          const documentManager = docManagerPlugin as unknown as {
+            getActiveDocumentId?: () => string | null;
+          };
+          const documentId = documentManager?.getActiveDocumentId?.();
+          if (!documentId) {
+            throw new Error('No active PDF is available to verify.');
+          }
+
+          const baselinePromise = baselineMap.get(documentId);
+          if (!baselinePromise) {
+            throw new Error(
+              'The preservation baseline is missing, so this save cannot be verified safely.'
+            );
+          }
+
           const exportPlugin = registry.getPlugin('export').provides();
           const arrayBuffer = await exportPlugin.saveAsCopy().toPromise();
+          const baseline = await baselinePromise;
+          const state = getMutationState(documentId);
+          const violations = await verifyPdfPreservation(arrayBuffer, baseline, {
+            touchedPages: Array.from(state.touchedPages),
+            annotationPages: Array.from(state.annotationPages),
+            strictPageScope: state.touchedPages.size > 0,
+          });
+
+          if (violations.length > 0) {
+            console.error('Preservation guard blocked PDF save:', violations);
+            showAlert(
+              'Preservation Check Blocked Save',
+              `The PDF engine changed protected content or document properties that were not authorized, so the file was not downloaded.\n\n${violations
+                .slice(0, 10)
+                .map((violation) => `• ${violation}`)
+                .join('\n')}${
+                violations.length > 10
+                  ? `\n• …and ${violations.length - 10} more change(s).`
+                  : ''
+              }`
+            );
+            return;
+          }
+
           const blob = new Blob([arrayBuffer], { type: 'application/pdf' });
-          downloadFile(blob, currentFileName);
+          downloadFile(
+            blob,
+            documentFileNameMap.get(documentId) ?? currentFileName
+          );
         } catch (err) {
           console.error('Error downloading PDF:', err);
-          showAlert('Error', 'Failed to download the edited PDF.');
+          const message = err instanceof Error ? err.message : String(err);
+          showAlert(
+            'Preservation Verification Failed',
+            `The file was not downloaded because BentoPDF could not prove that protected PDF properties were preserved.\n\n${message}`
+          );
+        } finally {
+          hideLoader();
         }
       };
 
@@ -264,9 +383,11 @@ async function handleFiles(files: FileList) {
 
       for (let i = 0; i < decryptedFiles.length; i++) {
         const buffer = await decryptedFiles[i].arrayBuffer();
+        const documentKey = makeUniqueFileKey(i, decryptedFiles[i].name);
+        queuePreservationBaseline(documentKey, buffer);
         docManagerPlugin.openDocumentBuffer({
           buffer,
-          name: makeUniqueFileKey(i, decryptedFiles[i].name),
+          name: documentKey,
           autoActivate: true,
         });
       }
@@ -295,7 +416,7 @@ function ensureReplaceSelectedTextPanel(pdfWrapper: HTMLElement, registry: any) 
   const help = document.createElement('p');
   help.className = 'text-sm text-gray-400';
   help.textContent =
-    'Select one or more lines of existing PDF text. Remove permanently deletes only the selected text, without drawing a replacement box. Multi-page selections are supported for removal.';
+    'Select one or more lines of existing PDF text. Removal is destructive and transparent by default: no cover box, fill, or background is added. Downloads are blocked if protected metadata or unrelated pages change.';
 
   const removeButton = document.createElement('button');
   removeButton.id = 'remove-selected-text-btn';
@@ -371,6 +492,7 @@ async function removeSelectedText(registry: any) {
 
   try {
     await permanentlyRemoveCurrentSelection(registry, current.documentId);
+    recordTouchedPages(current.documentId, current.formattedSelection);
   } catch (error) {
     console.error('Error removing selected PDF text:', error);
     const message = error instanceof Error ? error.message : String(error);
@@ -415,6 +537,7 @@ async function replaceSelectedText(registry: any) {
 
     showLoader('Replacing selected text...');
     await permanentlyRemoveCurrentSelection(registry, documentId);
+    recordTouchedPages(documentId, formattedSelection);
 
     if (replacement.length > 0) {
       const annotationCapability = registry
@@ -427,7 +550,7 @@ async function replaceSelectedText(registry: any) {
       }
 
       const annotationScope = annotationCapability.forDocument(documentId);
-      const annotation = {
+      const annotation: any = {
         ...freeTextTool.defaults,
         id: createAnnotationId(),
         pageIndex,
@@ -436,8 +559,16 @@ async function replaceSelectedText(registry: any) {
         fontSize: estimateReplacementFontSize(replacementRect, replacement),
       };
 
+      if (DEFAULT_TRANSPARENT_EDITING) {
+        delete annotation.backgroundColor;
+        delete annotation.fillColor;
+        delete annotation.borderColor;
+        annotation.borderWidth = 0;
+      }
+
       annotationScope.createAnnotation(pageIndex, annotation);
       await annotationScope.commit().toPromise();
+      getMutationState(documentId).annotationPages.add(pageIndex);
     }
   } catch (error) {
     console.error('Error replacing selected PDF text:', error);
@@ -510,6 +641,7 @@ function addFileEntries(fileDisplayArea: HTMLElement, files: File[]) {
     fileDiv.className =
       'flex items-center justify-between bg-gray-700 p-3 rounded-lg';
     fileDiv.setAttribute('data-pending-name', makeUniqueFileKey(i, file.name));
+    fileDiv.setAttribute('data-file-name', file.name);
 
     const infoContainer = document.createElement('div');
     infoContainer.className = 'flex flex-col flex-1 min-w-0';
