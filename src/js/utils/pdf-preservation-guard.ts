@@ -130,8 +130,11 @@ async function normalizePdfObject(
     typeName === 'PDFPageLeaf'
   ) {
     const entries: Array<[any, any]> = Array.from(object.entries?.() ?? []);
-    const normalizedEntries: Array<[string, any]> = entries
-      .map(([key, value]) => [String(key).replace(/^\//, ''), value])
+    const normalizedEntries = entries
+      .map(
+        ([key, value]) =>
+          [String(key).replace(/^\//, ''), value] as [string, any]
+      )
       .filter(([key]) => !(applyRootSkip && rootSkipKeys.has(key)))
       .sort(([left], [right]) => left.localeCompare(right));
 
