@@ -10,8 +10,6 @@ function sitePassword(): string {
 
 function authSecret(): string {
   const configuredSecret = process.env.AUTH_SECRET?.trim() || sitePassword();
-  // Bind sessions to both the private signing secret and the current password,
-  // so changing either value invalidates every existing cookie.
   return `${configuredSecret}\u0000${sitePassword()}`;
 }
 
@@ -23,7 +21,6 @@ function bytesToHex(bytes: Uint8Array): string {
 
 function constantTimeEqual(left: string, right: string): boolean {
   if (left.length !== right.length) return false;
-
   let difference = 0;
   for (let index = 0; index < left.length; index++) {
     difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
@@ -64,25 +61,20 @@ async function securePasswordMatch(candidate: string): Promise<boolean> {
 }
 
 async function createSessionToken(): Promise<string> {
-  const expiresAt =
-    Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
+  const expiresAt = Math.floor(Date.now() / 1000) + SESSION_TTL_SECONDS;
   const payload = `v1.${expiresAt}`;
   return `${payload}.${await hmac(payload)}`;
 }
 
 function getCookie(request: Request, name: string): string | null {
   const header = request.headers.get('cookie') ?? '';
-
   for (const part of header.split(';')) {
     const separator = part.indexOf('=');
     if (separator < 0) continue;
-
     const cookieName = part.slice(0, separator).trim();
     if (cookieName !== name) continue;
-
     return part.slice(separator + 1).trim();
   }
-
   return null;
 }
 
@@ -106,7 +98,7 @@ async function hasValidSession(request: Request): Promise<boolean> {
 }
 
 function securityHeaders(): Headers {
-  const headers = new Headers({
+  return new Headers({
     'cache-control': 'no-store, max-age=0',
     pragma: 'no-cache',
     expires: '0',
@@ -121,7 +113,6 @@ function securityHeaders(): Headers {
     'content-security-policy':
       "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
   });
-  return headers;
 }
 
 function loginPage(error = false, status?: number): Response {
@@ -160,7 +151,6 @@ function loginPage(error = false, status?: number): Response {
 
   const headers = securityHeaders();
   headers.set('content-type', 'text/html; charset=utf-8');
-
   return new Response(html, {
     status: status ?? (error ? 401 : 200),
     headers,
@@ -176,28 +166,37 @@ function methodNotAllowed(): Response {
 function requestIsSameOrigin(request: Request): boolean {
   const origin = request.headers.get('origin');
   if (!origin) return true;
-  return origin === new URL(request.url).origin;
+
+  try {
+    const originUrl = new URL(origin);
+    const requestUrl = new URL(request.url);
+    const forwardedHost =
+      request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() ||
+      request.headers.get('host') ||
+      requestUrl.host;
+    const forwardedProto =
+      request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim() ||
+      requestUrl.protocol.replace(':', '');
+
+    return (
+      originUrl.host === forwardedHost &&
+      originUrl.protocol === `${forwardedProto}:`
+    );
+  } catch {
+    return false;
+  }
 }
 
 async function readLoginPassword(request: Request): Promise<string | null> {
-  const contentType = (
-    request.headers.get('content-type') ?? ''
-  )
+  const contentType = (request.headers.get('content-type') ?? '')
     .split(';', 1)[0]
     .trim()
     .toLowerCase();
 
-  if (contentType !== 'application/x-www-form-urlencoded') {
-    return null;
-  }
+  if (contentType !== 'application/x-www-form-urlencoded') return null;
 
-  const declaredLength = Number(
-    request.headers.get('content-length') ?? '0'
-  );
-  if (
-    Number.isFinite(declaredLength) &&
-    declaredLength > MAX_LOGIN_BODY_BYTES
-  ) {
+  const declaredLength = Number(request.headers.get('content-length') ?? '0');
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_LOGIN_BODY_BYTES) {
     return null;
   }
 
@@ -229,20 +228,15 @@ export default async function middleware(request: Request) {
     }
 
     const password = await readLoginPassword(request);
-    if (
-      password !== null &&
-      (await securePasswordMatch(password))
-    ) {
+    if (password !== null && (await securePasswordMatch(password))) {
       const url = new URL(request.url);
       const token = await createSessionToken();
       const headers = securityHeaders();
-
       headers.set('location', `${url.pathname}${url.search}`);
       headers.set(
         'set-cookie',
         `${COOKIE_NAME}=${token}; Path=/; Max-Age=${SESSION_TTL_SECONDS}; HttpOnly; Secure; SameSite=Strict`
       );
-
       return new Response(null, { status: 303, headers });
     }
 
