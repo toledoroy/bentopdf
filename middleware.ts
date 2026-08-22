@@ -1,14 +1,16 @@
-// Product decision: this is a lightweight, fixed private-site gate. The
-// password deliberately remains `123` and must not vary by deployment config.
-const SITE_PASSWORD = '123';
+const DEFAULT_PASSWORD = '123';
 const COOKIE_NAME = '__Host-bentopdf_access';
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const MAX_LOGIN_BODY_BYTES = 4096;
 const encoder = new TextEncoder();
 
+function sitePassword(): string {
+  return process.env.SITE_PASSWORD?.trim() || DEFAULT_PASSWORD;
+}
+
 function authSecret(): string {
-  const configuredSecret = process.env.AUTH_SECRET?.trim() || SITE_PASSWORD;
-  return `${configuredSecret}\u0000${SITE_PASSWORD}`;
+  const configuredSecret = process.env.AUTH_SECRET?.trim() || sitePassword();
+  return `${configuredSecret}\u0000${sitePassword()}`;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -53,7 +55,7 @@ async function hmac(value: string): Promise<string> {
 async function securePasswordMatch(candidate: string): Promise<boolean> {
   const [candidateHash, expectedHash] = await Promise.all([
     sha256(candidate),
-    sha256(SITE_PASSWORD),
+    sha256(sitePassword()),
   ]);
   return constantTimeEqual(candidateHash, expectedHash);
 }
@@ -194,10 +196,7 @@ async function readLoginPassword(request: Request): Promise<string | null> {
   if (contentType !== 'application/x-www-form-urlencoded') return null;
 
   const declaredLength = Number(request.headers.get('content-length') ?? '0');
-  if (
-    Number.isFinite(declaredLength) &&
-    declaredLength > MAX_LOGIN_BODY_BYTES
-  ) {
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_LOGIN_BODY_BYTES) {
     return null;
   }
 
