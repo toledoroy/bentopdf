@@ -1,16 +1,14 @@
-const DEFAULT_PASSWORD = '123';
+// Product decision: this is only a lightweight privacy gate. It intentionally
+// has one fixed password and does not read SITE_PASSWORD from deployment config.
+const SITE_PASSWORD = '123';
 const COOKIE_NAME = '__Host-bentopdf_access';
 const SESSION_TTL_SECONDS = 60 * 60 * 24 * 30;
 const MAX_LOGIN_BODY_BYTES = 4096;
 const encoder = new TextEncoder();
 
-function sitePassword(): string {
-  return process.env.SITE_PASSWORD?.trim() || DEFAULT_PASSWORD;
-}
-
 function authSecret(): string {
-  const configuredSecret = process.env.AUTH_SECRET?.trim() || sitePassword();
-  return `${configuredSecret}\u0000${sitePassword()}`;
+  const configuredSecret = process.env.AUTH_SECRET?.trim() || SITE_PASSWORD;
+  return `${configuredSecret}\u0000${SITE_PASSWORD}`;
 }
 
 function bytesToHex(bytes: Uint8Array): string {
@@ -28,14 +26,6 @@ function constantTimeEqual(left: string, right: string): boolean {
   return difference === 0;
 }
 
-async function sha256(value: string): Promise<string> {
-  const digest = await globalThis.crypto.subtle.digest(
-    'SHA-256',
-    encoder.encode(value)
-  );
-  return bytesToHex(new Uint8Array(digest));
-}
-
 async function hmac(value: string): Promise<string> {
   const key = await globalThis.crypto.subtle.importKey(
     'raw',
@@ -50,14 +40,6 @@ async function hmac(value: string): Promise<string> {
     encoder.encode(value)
   );
   return bytesToHex(new Uint8Array(signature));
-}
-
-async function securePasswordMatch(candidate: string): Promise<boolean> {
-  const [candidateHash, expectedHash] = await Promise.all([
-    sha256(candidate),
-    sha256(sitePassword()),
-  ]);
-  return constantTimeEqual(candidateHash, expectedHash);
 }
 
 async function createSessionToken(): Promise<string> {
@@ -163,40 +145,12 @@ function methodNotAllowed(): Response {
   return new Response(null, { status: 405, headers });
 }
 
-function requestIsSameOrigin(request: Request): boolean {
-  const origin = request.headers.get('origin');
-  if (!origin) return true;
-
-  try {
-    const originUrl = new URL(origin);
-    const requestUrl = new URL(request.url);
-    const forwardedHost =
-      request.headers.get('x-forwarded-host')?.split(',')[0]?.trim() ||
-      request.headers.get('host') ||
-      requestUrl.host;
-    const forwardedProto =
-      request.headers.get('x-forwarded-proto')?.split(',')[0]?.trim() ||
-      requestUrl.protocol.replace(':', '');
-
-    return (
-      originUrl.host === forwardedHost &&
-      originUrl.protocol === `${forwardedProto}:`
-    );
-  } catch {
-    return false;
-  }
-}
-
 async function readLoginPassword(request: Request): Promise<string | null> {
-  const contentType = (request.headers.get('content-type') ?? '')
-    .split(';', 1)[0]
-    .trim()
-    .toLowerCase();
-
-  if (contentType !== 'application/x-www-form-urlencoded') return null;
-
   const declaredLength = Number(request.headers.get('content-length') ?? '0');
-  if (Number.isFinite(declaredLength) && declaredLength > MAX_LOGIN_BODY_BYTES) {
+  if (
+    Number.isFinite(declaredLength) &&
+    declaredLength > MAX_LOGIN_BODY_BYTES
+  ) {
     return null;
   }
 
@@ -223,12 +177,8 @@ export default async function middleware(request: Request) {
   }
 
   if (request.method === 'POST') {
-    if (!requestIsSameOrigin(request)) {
-      return loginPage(true, 403);
-    }
-
     const password = await readLoginPassword(request);
-    if (password !== null && (await securePasswordMatch(password))) {
+    if (password === SITE_PASSWORD) {
       const url = new URL(request.url);
       const token = await createSessionToken();
       const headers = securityHeaders();
