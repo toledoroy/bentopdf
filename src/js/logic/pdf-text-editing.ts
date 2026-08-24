@@ -35,7 +35,7 @@ export function installTextEditingPanel(
   const panel = document.createElement('div');
   panel.id = 'replace-selected-text-panel';
   panel.className =
-    'mt-4 p-4 bg-gray-900 border border-gray-700 rounded-lg space-y-3';
+    'mb-4 p-4 bg-gray-800 border border-indigo-500 rounded-xl ring-1 ring-indigo-500/30 shadow-lg space-y-3';
 
   const heading = document.createElement('div');
   heading.className = 'flex items-center gap-2';
@@ -66,7 +66,11 @@ export function installTextEditingPanel(
   };
 
   panel.append(heading, help, removeButton, replaceButton);
-  pdfWrapper.appendChild(panel);
+
+  // Product decision: make the custom destructive text workflow the first
+  // editor control while leaving the embedded viewer and its lifecycle intact.
+  const viewer = pdfWrapper.querySelector('#embed-pdf-container');
+  pdfWrapper.insertBefore(panel, viewer);
   createIcons({ icons });
 }
 
@@ -80,9 +84,7 @@ function getCurrentTextSelection(
     return null;
   }
 
-  const selectionCapability = registry
-    .getPlugin('selection')
-    .provides() as any;
+  const selectionCapability = registry.getPlugin('selection').provides() as any;
   const selectionScope = selectionCapability.forDocument(documentId);
   const formattedSelection =
     selectionScope.getFormattedSelection() as FormattedSelection[];
@@ -119,10 +121,7 @@ async function removeSelectedText(
       current.formattedSelection
     );
     await commitIsolatedRedactions(redactionSession);
-    session.recordTouchedPages(
-      current.documentId,
-      current.formattedSelection
-    );
+    session.recordTouchedPages(current.documentId, current.formattedSelection);
   } catch (error) {
     if (redactionSession?.commitStarted) {
       session.markUnsafe(
@@ -291,13 +290,11 @@ async function replaceSelectedText(
   } catch (error) {
     let rollbackFailed = false;
     if (annotationMayHaveCommitted && annotationScope && annotationId) {
-      rollbackFailed = !(
-        await rollbackReplacementAnnotation(
-          annotationScope,
-          formattedSelection[0]?.pageIndex ?? 0,
-          annotationId
-        )
-      );
+      rollbackFailed = !(await rollbackReplacementAnnotation(
+        annotationScope,
+        formattedSelection[0]?.pageIndex ?? 0,
+        annotationId
+      ));
     }
 
     if (redactionSession?.commitStarted) {
