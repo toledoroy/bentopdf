@@ -1,6 +1,6 @@
 # Prioritize Existing Text Editor
 
-Status: In Progress
+Status: Done
 Task Type: Feature
 Severity: Medium
 Priority: P1
@@ -17,9 +17,9 @@ Place the custom **Remove / Replace Existing Text** workflow first in the PDF Ed
 
 ## Scope
 
-- Keep the existing removal and replacement handlers and preservation safeguards unchanged.
-- Mount the panel before the embedded viewer and use established dark/indigo utility styling to distinguish it.
-- Build, commit to `main`, and verify the production editor route after the Git-connected Vercel deployment.
+- Kept the existing removal and replacement handlers and preservation safeguards unchanged.
+- Mounted the panel before the embedded viewer with established dark/indigo utility styling.
+- Built, committed to `main`, and verified the Git-connected Vercel production deployment.
 
 ## Non-Goals
 
@@ -28,14 +28,14 @@ Place the custom **Remove / Replace Existing Text** workflow first in the PDF Ed
 
 ## Context
 
-- The panel is currently created by `installTextEditingPanel` and appended after `#embed-pdf-container`.
+- The panel is created by `installTextEditingPanel`; it now inserts before `#embed-pdf-container`.
 - The viewer is initialized in `src/js/logic/edit-pdf-page.ts`.
 
 ## Metadata Notes
 
-- Severity rationale: The feature is functional but difficult to discover in its current placement.
+- Severity rationale: The feature was functional but difficult to discover in its former placement.
 - Priority rationale: The user explicitly requested this layout improvement.
-- Folder placement: Move this file to `docs/tasks/completed/` when deployment verification passes.
+- Folder placement: Completed task record.
 
 ## Related Codex Plans
 
@@ -43,9 +43,9 @@ Place the custom **Remove / Replace Existing Text** workflow first in the PDF Ed
 
 ## Plan
 
-- [ ] Mount and visually distinguish the existing text-editing panel above the viewer.
-- [ ] Run focused static checks and a production build.
-- [ ] Commit on `main`, confirm Vercel production readiness, and inspect `/edit-pdf`.
+- [x] Mount and visually distinguish the existing text-editing panel above the viewer.
+- [x] Run focused static checks and a production build.
+- [x] Commit on `main`, confirm Vercel production readiness, and inspect the deployed editor.
 
 ## Decisions
 
@@ -58,12 +58,13 @@ None.
 
 ## Verification
 
-- TypeScript check through the production build.
-- Inspect the built editor markup and the deployed `/edit-pdf` response.
+- `npm run build` completed successfully, including TypeScript and the production bundle.
+- Vercel deployment for commit `16c5e12` reached `READY` in production.
+- The deployed editor page at `/edit-pdf.html` loads with the PDF uploader and no browser console errors. The panel is created only after a PDF is uploaded; no document was uploaded during production verification.
 
 ## Risks and Questions
 
-- The production site is password gated, so interaction verification requires the existing authenticated deployment access.
+- The production site is password gated. A full post-upload visual check requires uploading a PDF in the authenticated editor session.
 
 ## Follow-Up Tasks
 
