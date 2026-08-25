@@ -1,6 +1,6 @@
 # Prioritize PDF Editor on Home
 
-Status: In Progress
+Status: Done
 Task Type: Feature
 Severity: Low
 Priority: P1
@@ -17,9 +17,9 @@ Make PDF Editor the first option in the home screen's Popular Tools section.
 
 ## Scope
 
-- Reorder the Popular Tools configuration only.
-- Preserve PDF Editor in its existing Edit & Annotate category and retain all search metadata.
-- Add a regression assertion for the home-card order, then build and deploy.
+- Reordered the Popular Tools configuration only.
+- Preserved PDF Editor in its existing Edit & Annotate category and retained all search metadata.
+- Added a regression assertion for the home-card order, built, and deployed.
 
 ## Non-Goals
 
@@ -35,8 +35,9 @@ None.
 
 ## Verification
 
-- Focused tools configuration test and production build.
-- Production deployment readiness.
+- `npm run test:run -- src/tests/tools.test.ts` passed (143 tests).
+- `npm run build` completed successfully.
+- Vercel deployment `dpl_HAcJPM23soVTGjCDgb5fQ6DBP1By` for commit `30aed5e` reached `READY` in production.
 
 ## Follow-Up Tasks
 
