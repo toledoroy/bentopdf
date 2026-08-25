@@ -159,8 +159,6 @@ export class PdfEditorSession {
   }
 
   installDownloadButton(pdfWrapper: HTMLElement, registry: any): void {
-    this.interceptUnverifiedExports(registry);
-
     let button = document.getElementById(
       'download-edited-pdf'
     ) as HTMLButtonElement | null;
@@ -177,50 +175,6 @@ export class PdfEditorSession {
     button.onclick = () => {
       void this.downloadVerifiedPdf(registry);
     };
-  }
-
-  private interceptUnverifiedExports(registry: any): void {
-    const exportCapability = registry.getPlugin('export').provides() as any;
-    if (!exportCapability || exportCapability.__bentoVerifiedExport) return;
-
-    const verifiedDownload = () => {
-      void this.downloadVerifiedPdf(registry);
-    };
-
-    try {
-      Object.defineProperty(exportCapability, '__bentoVerifiedExport', {
-        value: true,
-        configurable: false,
-        enumerable: false,
-        writable: false,
-      });
-      exportCapability.download = verifiedDownload;
-
-      const originalForDocument = exportCapability.forDocument?.bind(
-        exportCapability
-      );
-      if (originalForDocument) {
-        exportCapability.forDocument = (documentId: string) => {
-          const scope = originalForDocument(documentId);
-          scope.download = () => {
-            if (this.activeDocumentId() !== documentId) {
-              showAlert(
-                'Activate PDF First',
-                'Select the PDF tab before downloading it through the verified export path.'
-              );
-              return;
-            }
-            verifiedDownload();
-          };
-          return scope;
-        };
-      }
-    } catch (error) {
-      console.error('Could not intercept unverified PDF exports:', error);
-      throw new Error(
-        'The embedded viewer export path could not be secured. Reload the editor before continuing.'
-      );
-    }
   }
 
   private getMutationState(documentId: string): MutationState {

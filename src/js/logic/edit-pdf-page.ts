@@ -15,8 +15,8 @@ const embedPdfWasmUrl = new URL(
 
 // This editor's verified-save policy only authorizes the custom transparent
 // text removal/replacement workflow. Hide unrelated mutation and bypass paths
-// instead of allowing them to create an in-memory document that cannot pass
-// preservation verification.
+// through the viewer's supported categories instead of mutating immutable
+// third-party export capabilities during editor initialization.
 const HARDENED_EDITOR_DISABLED_CATEGORIES = [
   'annotation',
   'redaction',
@@ -25,6 +25,7 @@ const HARDENED_EDITOR_DISABLED_CATEGORIES = [
   'document-open',
   'document-print',
   'document-protect',
+  'document-export',
   'rotate',
   'panel-comment',
   'panel-annotation-style',
@@ -227,11 +228,7 @@ async function handleFiles(files: FileList): Promise<void> {
       });
       docManagerPlugin.onDocumentOpened(
         (data: { id?: string; name?: string }) => {
-          bindOpenedDocument(
-            fileDisplayArea,
-            data?.id ?? '',
-            data?.name ?? ''
-          );
+          bindOpenedDocument(fileDisplayArea, data?.id ?? '', data?.name ?? '');
         }
       );
 
@@ -320,9 +317,7 @@ function openPreparedDocuments(
     docManagerPlugin.openDocumentBuffer({
       buffer: document.buffer,
       name: document.documentKey,
-      autoActivate: activateLast
-        ? index === prepared.length - 1
-        : index === 0,
+      autoActivate: activateLast ? index === prepared.length - 1 : index === 0,
     });
   }
 }
@@ -353,8 +348,7 @@ function addFileEntries(
     infoContainer.className = 'flex flex-col flex-1 min-w-0';
 
     const name = document.createElement('div');
-    name.className =
-      'truncate font-medium text-gray-200 text-sm mb-1';
+    name.className = 'truncate font-medium text-gray-200 text-sm mb-1';
     name.textContent = prepared.file.name;
 
     const size = document.createElement('div');
@@ -365,8 +359,7 @@ function addFileEntries(
     const removeButton = document.createElement('button');
     removeButton.className =
       'ml-4 text-red-400 hover:text-red-300 flex-shrink-0';
-    removeButton.innerHTML =
-      '<i data-lucide="trash-2" class="w-4 h-4"></i>';
+    removeButton.innerHTML = '<i data-lucide="trash-2" class="w-4 h-4"></i>';
     removeButton.setAttribute('data-remove-btn', 'true');
     removeButton.onclick = () => {
       fileDiv.remove();
