@@ -3,6 +3,15 @@ const baseCategories = [
   {
     name: 'Popular Tools',
     tools: [
+      // Product decision: this is the main entry point for the custom text
+      // removal/replacement workflow, so it leads the home-screen tool list.
+      {
+        href: import.meta.env.BASE_URL + 'edit-pdf.html',
+        name: 'PDF Editor',
+        icon: 'ph-pencil-simple',
+        subtitle:
+          'Annotate, highlight, redact, comment, add shapes/images, search, and view PDFs',
+      },
       {
         href: import.meta.env.BASE_URL + 'pdf-workflow.html',
         name: 'PDF Workflow Builder',
@@ -34,13 +43,6 @@ const baseCategories = [
         name: 'Compress PDF',
         icon: 'ph-lightning',
         subtitle: 'Reduce the file size of your PDF.',
-      },
-      {
-        href: import.meta.env.BASE_URL + 'edit-pdf.html',
-        name: 'PDF Editor',
-        icon: 'ph-pencil-simple',
-        subtitle:
-          'Annotate, highlight, redact, comment, add shapes/images, search, and view PDFs',
       },
       {
         href: import.meta.env.BASE_URL + 'jpg-to-pdf.html',

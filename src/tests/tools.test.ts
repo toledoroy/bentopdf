@@ -4,6 +4,14 @@ import { categories } from '@/js/config/tools';
 import { describe, it, expect } from 'vitest';
 
 describe('Tool Categories Configuration', () => {
+  it('lists PDF Editor first in Popular Tools', () => {
+    const popularTools = categories.find(
+      (category) => category.name === 'Popular Tools'
+    );
+
+    expect(popularTools?.tools[0]?.name).toBe('PDF Editor');
+  });
+
   // 1. Basic Structure and Type Checking
   it('should be an array of category objects', () => {
     expect(Array.isArray(categories)).toBe(true);
